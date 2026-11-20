@@ -52,7 +52,11 @@ struct ControlPanel: View {
             }
 
             Divider()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+            Button("Quit") {
+                // Stop first so the tap is destroyed and other apps are un-muted before exit.
+                model.enabled = false
+                NSApplication.shared.terminate(nil)
+            }
         }
         .padding()
         .frame(width: 280)

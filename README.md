@@ -35,7 +35,7 @@ apps → process tap (originals muted) → ring buffer → 2 HRTF sources → he
                                      ↘ tempo estimator → orbit speed
 ```
 
-- `SystemAudioTap`: a Core Audio process tap on everything except this app, read through a private aggregate device clocked by the output device.
+- `SystemAudioTap`: a Core Audio process tap on everything except this app, read through a private aggregate device that holds only the tap.
 - `SpatialEngine`: `AVAudioEnvironmentNode` with one HRTF source per channel. The orbit rotates the listener, which moves both sources together.
 - `TempoEstimator`: autocorrelation of an onset-strength envelope over the last 12 seconds, re-estimated every 2 seconds.
 - `OrbitController`: maps tempo to rotation speed and eases between speeds so the position never jumps.
@@ -44,6 +44,7 @@ apps → process tap (originals muted) → ring buffer → 2 HRTF sources → he
 
 - The orbit matches the tempo, but it is not aligned to downbeats.
 - Assumes 4/4 time.
+- Adds about half a second of delay, so video is out of sync. It is meant for music.
 - Volume keys control the 8D output; per-app volume is unchanged.
 
 ## Test
