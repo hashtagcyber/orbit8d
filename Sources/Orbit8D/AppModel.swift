@@ -13,7 +13,10 @@ final class AppModel: ObservableObject {
     }
     /// Bars per orbit; 0 picks automatically.
     @Published var bars = 0 {
-        didSet { orbit.bars = bars == 0 ? .auto : .fixed(bars) }
+        didSet {
+            let bars = barsSetting
+            orbitQueue.async { [weak self] in self?.orbit.bars = bars }
+        }
     }
     @Published var width = 30.0 {
         didSet { engine?.setWidth(width) }
@@ -22,21 +25,28 @@ final class AppModel: ObservableObject {
         didSet { engine?.setReverb(reverb) }
     }
     @Published private(set) var bpm: Double?
+    @Published private(set) var dropouts = 0
     @Published private(set) var errorMessage: String?
 
-    var orbitPeriod: Double { orbit.targetPeriod }
+    var orbitPeriod: Double { OrbitController.period(bpm: bpm, bars: barsSetting) }
 
-    private var orbit = OrbitController()
+    private var barsSetting: OrbitController.Bars { bars == 0 ? .auto : .fixed(bars) }
+
     private var tap: SystemAudioTap?
     private var engine: SpatialEngine?
+    private var feeder: StereoFeeder?
     private var tempo: TempoEstimator?
-    private var orbitTimer: Timer?
     private var tempoTimer: Timer?
-    private var lastTick = 0.0
     private var missedEstimates = 0
     private var pendingRestart: DispatchWorkItem?
     private var configurationObserver: NSObjectProtocol?
     private let analysisQueue = DispatchQueue(label: "orbit8d.tempo", qos: .utility)
+
+    // The orbit runs off the main thread so UI work cannot make the motion stutter.
+    private let orbitQueue = DispatchQueue(label: "orbit8d.orbit", qos: .userInteractive)
+    private var orbit = OrbitController()
+    private var orbitTimer: DispatchSourceTimer?
+    private var lastTick = 0.0
 
     init() {
         var address = AudioObjectPropertyAddress(
@@ -56,8 +66,10 @@ final class AppModel: ObservableObject {
     private func start() {
         errorMessage = nil
         do {
-            let ring = StereoRingBuffer(capacityFrames: 96_000)
-            let feeder = StereoFeeder(ring: ring, primeFrames: 4_800)
+            // Half a second of cushion: capture arrives in bursts, and delay does not matter here.
+            let ring = StereoRingBuffer(capacityFrames: 192_000)
+            let feeder = StereoFeeder(ring: ring, primeFrames: 24_000)
+            self.feeder = feeder
 
             // The engine starts first so this process exists in Core Audio and the tap can exclude it.
             var engine = try SpatialEngine(feeder: feeder)
@@ -79,7 +91,7 @@ final class AppModel: ObservableObject {
                 ring.write(left: left, leftStride: leftStride, right: right, rightStride: rightStride, frames: frames)
                 tempo.process(left: left, leftStride: leftStride, right: right, rightStride: rightStride, frames: frames)
             }
-            startTimers()
+            startTimers(engine: engine)
         } catch {
             stop()
             errorMessage = error.localizedDescription
@@ -88,18 +100,20 @@ final class AppModel: ObservableObject {
     }
 
     private func stop() {
-        orbitTimer?.invalidate()
-        tempoTimer?.invalidate()
+        orbitTimer?.cancel()
         orbitTimer = nil
+        tempoTimer?.invalidate()
         tempoTimer = nil
         tap?.stop()
         engine?.stop()
         tap = nil
         engine = nil
+        feeder = nil
         tempo = nil
         bpm = nil
+        dropouts = 0
         missedEstimates = 0
-        orbit.setTempo(nil)
+        orbitQueue.async { [weak self] in self?.orbit.setTempo(nil) }
     }
 
     /// Rebuilds the pipeline after the output device changes. Both triggers can fire for one change.
@@ -115,24 +129,28 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: restart)
     }
 
-    private func startTimers() {
-        lastTick = ProcessInfo.processInfo.systemUptime
-        let orbitTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
-        let tempoTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.analyze() }
-        // Common modes keep the orbit moving while the menu bar panel is open.
-        RunLoop.main.add(orbitTimer, forMode: .common)
-        RunLoop.main.add(tempoTimer, forMode: .common)
+    private func startTimers(engine: SpatialEngine) {
+        let orbitTimer = DispatchSource.makeTimerSource(queue: orbitQueue)
+        orbitTimer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
+        orbitTimer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            // Capped so a late tick cannot swing the sound across the head.
+            let dt = self.lastTick == 0 ? 0 : min(now - self.lastTick, 0.05)
+            self.lastTick = now
+            engine.setOrbitAngle(self.orbit.advance(by: dt))
+        }
+        orbitTimer.resume()
         self.orbitTimer = orbitTimer
+
+        let tempoTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.analyze() }
+        // Common modes keep the timer firing while the menu bar panel is open.
+        RunLoop.main.add(tempoTimer, forMode: .common)
         self.tempoTimer = tempoTimer
     }
 
-    private func tick() {
-        let now = ProcessInfo.processInfo.systemUptime
-        engine?.setOrbitAngle(orbit.advance(by: now - lastTick))
-        lastTick = now
-    }
-
     private func analyze() {
+        dropouts = feeder?.underruns ?? 0
         guard let tempo else { return }
         analysisQueue.async { [weak self] in
             let estimate = tempo.estimate()
@@ -156,6 +174,7 @@ final class AppModel: ObservableObject {
             missedEstimates += 1
             if missedEstimates >= 5 { bpm = nil }
         }
-        orbit.setTempo(bpm)
+        let bpm = bpm
+        orbitQueue.async { [weak self] in self?.orbit.setTempo(bpm) }
     }
 }

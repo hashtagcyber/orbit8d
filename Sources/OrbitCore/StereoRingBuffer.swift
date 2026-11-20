@@ -49,6 +49,16 @@ public final class StereoRingBuffer {
         count += n
     }
 
+    /// Drops the oldest frames so that at most `frames` remain.
+    public func discard(downTo frames: Int) {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        let excess = count - frames
+        guard excess > 0 else { return }
+        readIndex = (readIndex + excess) % capacity
+        count -= excess
+    }
+
     /// Returns the number of frames read, which is less than `frames` on underrun.
     public func read(left destination: UnsafeMutablePointer<Float>, right otherDestination: UnsafeMutablePointer<Float>, frames: Int) -> Int {
         os_unfair_lock_lock(lock)

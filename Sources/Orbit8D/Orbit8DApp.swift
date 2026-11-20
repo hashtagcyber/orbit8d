@@ -54,7 +54,8 @@ struct ControlPanel: View {
     }
 
     private var status: String {
-        let period = String(format: "%.1f s orbit", model.orbitPeriod)
+        var period = String(format: "%.1f s orbit", model.orbitPeriod)
+        if model.dropouts > 0 { period += " · \(model.dropouts) dropouts" }
         guard let bpm = model.bpm else { return "No beat found · \(period)" }
         return "\(Int(bpm.rounded())) BPM · \(period)"
     }

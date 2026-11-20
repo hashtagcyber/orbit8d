@@ -16,6 +16,9 @@ public final class StereoFeeder {
     private var rightPosition = 0
     private var primed = false
 
+    /// Times playback ran dry after it had started. Written on the render thread.
+    public private(set) var underruns = 0
+
     /// - Parameter primeFrames: frames to accumulate before playback starts or resumes after an underrun.
     public init(ring: StereoRingBuffer, primeFrames: Int, capacity: Int = 16_384) {
         self.ring = ring
@@ -61,11 +64,17 @@ public final class StereoFeeder {
     }
 
     private func pull(_ frames: Int) {
-        if !primed { primed = ring.availableFrames >= primeFrames }
+        let available = ring.availableFrames
+        if !primed { primed = available >= primeFrames }
         var got = 0
         if primed {
+            // After a render stall the backlog would otherwise stay as permanent extra delay.
+            if primeFrames > 0, available > primeFrames * 3 { ring.discard(downTo: primeFrames) }
             got = ring.read(left: left + fill, right: right + fill, frames: frames)
-            if got < frames { primed = false }
+            if got < frames {
+                primed = false
+                underruns += 1
+            }
         }
         (left + fill + got).update(repeating: 0, count: frames - got)
         (right + fill + got).update(repeating: 0, count: frames - got)

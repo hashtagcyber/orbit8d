@@ -24,13 +24,19 @@ final class SpatialEngine {
         else { throw SpatialEngineError.noOutputDevice }
         self.sampleRate = mono.sampleRate
 
+        let limiter = AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0))
         engine.attach(environment)
-        engine.connect(environment, to: engine.mainMixerNode, format: stereo)
+        engine.attach(limiter)
+        engine.connect(environment, to: limiter, format: stereo)
+        engine.connect(limiter, to: engine.mainMixerNode, format: stereo)
         environment.outputType = .headphones
         environment.reverbParameters.enable = true
         environment.reverbParameters.loadFactoryReverbPreset(.mediumRoom)
-        // Headroom: HRTF filters boost the ear nearest each source.
-        engine.mainMixerNode.outputVolume = 0.7
 
         // Only mono inputs are spatialized, so each channel gets its own source.
         for channel in 0..<2 {
@@ -42,6 +48,8 @@ final class SpatialEngine {
             engine.attach(source)
             engine.connect(source, to: environment, format: mono)
             source.renderingAlgorithm = .HRTFHQ
+            // Centered content reaches each ear from both sources and would sum past full scale.
+            source.volume = 0.5
             sources.append(source)
         }
         setWidth(30)
