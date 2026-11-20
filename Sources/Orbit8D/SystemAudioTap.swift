@@ -25,6 +25,8 @@ final class SystemAudioTap {
     ) -> Void
 
     private(set) var sampleRate: Double = 0
+    /// Total frames captured. Written on the capture thread.
+    private(set) var framesDelivered = 0
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -50,38 +52,43 @@ final class SystemAudioTap {
         else { throw TapError.unsupportedFormat }
         sampleRate = format.mSampleRate
 
-        // The output device is the aggregate's clock, so capture and playback cannot drift apart.
-        let outputUID = try defaultOutputDeviceUID()
+        // The aggregate holds only the tap. Adding the output device would also open its
+        // microphone, which drops Bluetooth headphones into low-quality call mode.
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Orbit8D Tap",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
+            kAudioAggregateDeviceSubDeviceListKey: [[String: Any]](),
             kAudioAggregateDeviceTapListKey: [[
                 kAudioSubTapDriftCompensationKey: true,
                 kAudioSubTapUIDKey: description.uuid.uuidString,
             ]],
         ]
         try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID), "Create aggregate device")
+
+        // The IO proc delivers at the aggregate's rate, which is what playback must match.
+        var aggregateRate = 0.0
+        if readProperty(aggregateID, kAudioDevicePropertyNominalSampleRate, into: &aggregateRate) == noErr, aggregateRate > 0 {
+            sampleRate = aggregateRate
+        }
     }
 
     /// Starts delivering audio. The handler runs on the capture thread.
     func run(handler: @escaping Handler) throws {
-        let status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { _, input, _, output, _ in
+        let status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) { [weak self] _, input, _, output, _ in
             for buffer in UnsafeMutableAudioBufferListPointer(output) {
                 if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
             }
 
-            // Tap streams come after any input streams of the output device (a headset mic, say).
             let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             guard let last = buffers.last, let data = last.mData else { return }
             let samples = UnsafePointer(data.assumingMemoryBound(to: Float.self))
             let channels = Int(last.mNumberChannels)
             guard channels > 0 else { return }
             let frames = Int(last.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+            self?.framesDelivered += frames
 
             if channels >= 2 {
                 handler(samples, channels, samples + 1, channels, frames)
@@ -126,15 +133,6 @@ final class SystemAudioTap {
         return processObject
     }
 
-    private func defaultOutputDeviceUID() throws -> String {
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        try check(
-            readProperty(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, into: &deviceID),
-            "Find output device")
-        var uid = "" as CFString
-        try check(readProperty(deviceID, kAudioDevicePropertyDeviceUID, into: &uid), "Read output device UID")
-        return uid as String
-    }
 }
 
 private func readProperty<T>(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector, into value: inout T) -> OSStatus {

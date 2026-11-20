@@ -28,6 +28,11 @@ struct ControlPanel: View {
                 Text(status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let warning = model.rateWarning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Picker("Bars per orbit", selection: $model.bars) {

@@ -27,6 +27,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var bpm: Double?
     @Published private(set) var dropouts = 0
     @Published private(set) var errorMessage: String?
+    /// Set when audio arrives at a different rate than it is played, which causes dropouts.
+    @Published private(set) var rateWarning: String?
+
+    private var lastRateCheck = 0.0
+    private var lastFrameCount = 0
+    private var measuredRate = 0.0
 
     var orbitPeriod: Double { OrbitController.period(bpm: bpm, bars: barsSetting) }
 
@@ -112,6 +118,9 @@ final class AppModel: ObservableObject {
         tempo = nil
         bpm = nil
         dropouts = 0
+        rateWarning = nil
+        lastRateCheck = 0
+        measuredRate = 0
         missedEstimates = 0
         orbitQueue.async { [weak self] in self?.orbit.setTempo(nil) }
     }
@@ -149,8 +158,24 @@ final class AppModel: ObservableObject {
         self.tempoTimer = tempoTimer
     }
 
+    private func measureCaptureRate() {
+        guard let tap else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let frames = tap.framesDelivered
+        if lastRateCheck > 0, now > lastRateCheck {
+            let measured = Double(frames - lastFrameCount) / (now - lastRateCheck)
+            // Averaged, since a 2 s window catches a whole number of capture bursts.
+            measuredRate = measuredRate == 0 ? measured : measuredRate * 0.8 + measured * 0.2
+            let off = abs(measuredRate - tap.sampleRate) / tap.sampleRate
+            rateWarning = off > 0.02 ? String(format: "capture %.1f kHz, expected %.1f", measuredRate / 1000, tap.sampleRate / 1000) : nil
+        }
+        lastRateCheck = now
+        lastFrameCount = frames
+    }
+
     private func analyze() {
         dropouts = feeder?.underruns ?? 0
+        measureCaptureRate()
         guard let tempo else { return }
         analysisQueue.async { [weak self] in
             let estimate = tempo.estimate()
